@@ -86,9 +86,8 @@ function realisticMac(id: string): string {
 
 const docker = new Docker(); // 默认连 /var/run/docker.sock
 
-// 面板自身所在的 docker 网络名；新实例都 attach 到它，便于按容器名互访。
-// 可通过 WOC_DOCKER_NETWORK 显式覆盖（如 bridge / host / 外部网络名）；留空则自动探测面板所在网络。
-let networkName: string | null = process.env.WOC_DOCKER_NETWORK || null;
+// 面板自身所在的 docker 网络名；新实例都 attach 到它，便于按容器名互访。启动时自动探测面板所在网络。
+let networkName: string | null = null;
 
 function isCustomDockerNetwork(net: string): boolean {
   return net !== 'bridge' && net !== 'host' && net !== 'none' && !net.startsWith('container:');
@@ -97,7 +96,7 @@ function isCustomDockerNetwork(net: string): boolean {
 export type RuntimeState = 'running' | 'stopped' | 'missing';
 
 // 启动时探测面板自身网络（容器内 hostname = 容器短 id）。失败不致命：
-// 退回 WOC_DOCKER_NETWORK 或 null（null 时用 docker 默认 bridge，靠 IP 不靠名字会有问题，故尽量探测成功）。
+// 退回 null（null 时用 docker 默认 bridge，靠 IP 不靠名字会有问题，故尽量探测成功）。
 export async function ensureNetwork(): Promise<string | null> {
   if (networkName) return networkName;
   try {
