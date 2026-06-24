@@ -30,6 +30,12 @@ services:
       - WOC_WATCHDOG_INTERVAL_SEC=${WOC_WATCHDOG_INTERVAL_SEC:-300}
       # 设备伪装：os-release 伪装成 deepin（默认开，=0 关恢复 Debian）。详见 .env.example / doc/设备伪装.md。
       - WOC_SPOOF_OS=${WOC_SPOOF_OS:-1}
+      # 实例数据挂载：留空=命名卷 woc-data-<id>；设宿主路径则 bind mount 到 <前缀>/<实例id>（见 .env.example）。
+      - WOC_DATA_BIND_PREFIX=${WOC_DATA_BIND_PREFIX:-}
+      # 每个实例额外 bind mount（逗号分隔，格式同 docker -v）。
+      - WOC_EXTRA_BINDS=${WOC_EXTRA_BINDS:-}
+      # 实例网络模式：留空=自动加入面板所在 compose 网络（推荐）；bridge/host/自定义网络名见 .env.example。
+      - WOC_DOCKER_NETWORK=${WOC_DOCKER_NETWORK:-}
       # 实例桌面深色：由面板顶栏的主题开关统一控制（管理员），持久化在 accounts.json，无需在此配 env。
       # 面板首个管理员账号（仅首次启动、无账号文件时写入；务必改掉默认密码）
       - PANEL_ADMIN_USER=${WOC_USER:-admin}

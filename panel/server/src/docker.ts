@@ -1,5 +1,5 @@
 import { hostname } from 'node:os';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { appendInstanceLog, deleteInstanceLog, appendPanelLog, readInstanceLog, readPanelLog, filterSince } from './logs.js';
 import http from 'node:http';
 import zlib from 'node:zlib';
@@ -28,6 +28,35 @@ const INSTANCE_MEM = INSTANCE_MEM_GB > 0 ? Math.floor(INSTANCE_MEM_GB * 1024 * 1
 // 配合 00-woc-identity 钩子里的 machine-id 唯一化 + 真实 hostname，整体让容器更像一台普通 Linux 桌面，
 // 降低被腾讯按"非真实设备/设备农场"判风险的概率。注意：尽力而为，非保证；详见 doc/设备伪装.md。
 const SPOOF_OS = process.env.WOC_SPOOF_OS !== '0';
+
+// 实例数据卷挂载：默认 Docker 命名卷 woc-data-<id> → /config。
+// 设 WOC_DATA_BIND_PREFIX 后改为宿主目录 bind mount：<前缀>/<实例id> → /config（路径相对 Docker 宿主，非面板容器内）。
+const DATA_BIND_PREFIX = (process.env.WOC_DATA_BIND_PREFIX || '').replace(/\/+$/, '');
+
+// 每个实例额外 bind mount（逗号分隔，格式同 docker -v：宿主路径:容器路径[:ro]）。
+function extraBinds(): string[] {
+  return (process.env.WOC_EXTRA_BINDS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function instanceDataBind(inst: Instance): string {
+  if (DATA_BIND_PREFIX) return `${DATA_BIND_PREFIX}/${inst.id}:/config`;
+  return `${inst.volumeName}:/config`;
+}
+
+function instanceBinds(inst: Instance): string[] {
+  if (DATA_BIND_PREFIX) {
+    const hostDir = `${DATA_BIND_PREFIX}/${inst.id}`;
+    try {
+      mkdirSync(hostDir, { recursive: true });
+    } catch (e: any) {
+      console.warn(`[docker] 无法创建数据目录 ${hostDir}:`, e?.message || e);
+    }
+  }
+  return [instanceDataBind(inst), ...extraBinds()];
+}
 
 // 给实例容器派生一个"像个人电脑"的内部 hostname（替代 woc-wx-<hex> 这种容器/服务器特征）。
 // 从 inst.id 稳定派生：同一实例每次重建得到相同名字、不同实例不同。仅作伪装，不参与寻址
@@ -58,7 +87,12 @@ function realisticMac(id: string): string {
 const docker = new Docker(); // 默认连 /var/run/docker.sock
 
 // 面板自身所在的 docker 网络名；新实例都 attach 到它，便于按容器名互访。
+// 可通过 WOC_DOCKER_NETWORK 显式覆盖（如 bridge / host / 外部网络名）；留空则自动探测面板所在网络。
 let networkName: string | null = process.env.WOC_DOCKER_NETWORK || null;
+
+function isCustomDockerNetwork(net: string): boolean {
+  return net !== 'bridge' && net !== 'host' && net !== 'none' && !net.startsWith('container:');
+}
 
 export type RuntimeState = 'running' | 'stopped' | 'missing';
 
@@ -164,7 +198,7 @@ export async function runInstance(inst: Instance): Promise<void> {
   // 摄像头设备（探测不到则为空数组 → 仅摄像头不可用，音频/麦克风照常）
   const vids = videoDevices();
   const hostConfig: Docker.HostConfig = {
-    Binds: [`${inst.volumeName}:/config`],
+    Binds: instanceBinds(inst),
     NetworkMode: net || undefined,
     SecurityOpt: ['seccomp=unconfined'],
     ShmSize: SHM_SIZE,
@@ -191,8 +225,9 @@ export async function runInstance(inst: Instance): Promise<void> {
     ExposedPorts: { '3000/tcp': {} },
     HostConfig: hostConfig,
   };
-  // 自定义网络时，MAC 须写到对应 endpoint 上（新版 docker 弃用顶层 MacAddress）；默认网络则用顶层。
-  if (net) {
+  // 自定义网络时，MAC 须写到对应 endpoint 上（新版 docker 弃用顶层 MacAddress）；
+  // bridge/host/none 等内置模式用顶层 MacAddress，且不能设 EndpointsConfig。
+  if (net && isCustomDockerNetwork(net)) {
     createOpts.NetworkingConfig = { EndpointsConfig: { [net]: { MacAddress: mac } as any } };
   } else {
     (createOpts as any).MacAddress = mac;
