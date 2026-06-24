@@ -628,7 +628,11 @@ export async function buildDiagnostics(instances: Instance[], sinceMs: number, m
     const info: any = await docker.info();
     sys += `容器: ${info.Containers}（运行 ${info.ContainersRunning}） · 镜像: ${info.Images}\n`;
     sys += `内核: ${info.KernelVersion} · OS: ${info.OperatingSystem} · 架构: ${info.Architecture}\n`;
-    sys += `CPU: ${info.NCPU} 核 · 内存: ${(info.MemTotal / 1073741824).toFixed(1)} GiB\n`;
+    sys += `CPU: ${info.NCPU} 核 · 内存: ${(info.MemTotal / 1073741824).toFixed(1)} GiB · 内存限制支持: ${info.MemoryLimit ? '是' : '否'} · Swap限制支持: ${info.SwapLimit ? '是' : '否'}\n`;
+    // cgroup / 存储 / 安全选项：排查 Ubuntu server 上的内存限制不生效、apparmor/userns 限制、seccomp 等宿主级问题。
+    sys += `cgroup: v${info.CgroupVersion ?? '?'}/${info.CgroupDriver ?? '?'} · 存储驱动: ${info.Driver}\n`;
+    if (Array.isArray(info.SecurityOptions) && info.SecurityOptions.length)
+      sys += `安全选项: ${info.SecurityOptions.map((o: string) => o.replace(/^name=/, '')).join(', ')}\n`;
     if (Array.isArray(info.Warnings) && info.Warnings.length) sys += `Docker 警告: ${info.Warnings.join('; ')}\n`;
   } catch (e: any) {
     sys += `Docker info: 获取失败 ${e?.message || e}\n`;
@@ -639,6 +643,12 @@ export async function buildDiagnostics(instances: Instance[], sinceMs: number, m
   } catch {
     sys += `\n实例镜像 ${WECHAT_IMAGE}: 本地不存在（首次新建实例需联网拉取，可能在此卡住）\n`;
   }
+  // 面板侧实例资源配置（排查内存：默认不设 docker 硬上限时，单实例涨太大会被宿主内核 OOM-killer 杀，
+  // 在小内存 Ubuntu server 上尤其常见，表现为黑屏/502/反复重启）。
+  sys += `\n面板实例配置: SHM=${(SHM_SIZE / 1073741824).toFixed(0)}GiB`;
+  sys += ` · docker硬内存上限=${INSTANCE_MEM > 0 ? (INSTANCE_MEM / 1073741824).toFixed(1) + 'GiB' : '未设(不限，靠宿主 OOM 兜底)'}`;
+  sys += ` · GPU=${ENABLE_GPU ? '开' : '关(软件渲染)'}\n`;
+  sys += `内存自愈阈值(MiB): soft=${process.env.WOC_INSTANCE_MEM_SOFT_MB || '1500'} · hard=${process.env.WOC_INSTANCE_MEM_HARD_MB || '2500'}\n`;
   sys += `\n实例数: ${instances.length}\n`;
   entries.push({ name: 'system.txt', content: sys });
 
@@ -654,6 +664,15 @@ export async function buildDiagnostics(instances: Instance[], sinceMs: number, m
       c += `===== 容器状态 =====\n运行: ${s.Running} · 状态: ${s.Status} · 退出码: ${s.ExitCode}\n`;
       c += `OOMKilled: ${s.OOMKilled} · 重启次数: ${info.RestartCount} · 启动于: ${s.StartedAt}\n`;
       if (s.Error) c += `错误: ${s.Error}\n`;
+      // 实时内存占用：配合宿主总内存/OOMKilled 一眼判断是不是内存不足（小内存 server 的高频成因）。
+      if (s.Running) {
+        try {
+          const mem = await instanceMemoryMB(inst);
+          if (mem > 0) c += `当前内存占用: ${mem} MiB\n`;
+        } catch {
+          /* stats 偶发不可用，忽略 */
+        }
+      }
       c += `镜像: ${String(info.Image).slice(0, 19)} · 健康: ${s.Health?.Status ?? 'n/a'}\n\n`;
     } catch (e: any) {
       c += `===== 容器状态 =====\n无法读取（容器可能未创建/已删除）：${e?.message || e}\n\n`;
