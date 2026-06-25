@@ -99,14 +99,25 @@ export type RuntimeState = 'running' | 'stopped' | 'missing';
 // 退回 null（null 时用 docker 默认 bridge，靠 IP 不靠名字会有问题，故尽量探测成功）。
 export async function ensureNetwork(): Promise<string | null> {
   if (networkName) return networkName;
-  try {
-    const self = docker.getContainer(hostname());
-    const info = await self.inspect();
-    const nets = Object.keys(info.NetworkSettings?.Networks || {}).filter((n) => n !== 'none' && n !== 'host');
-    if (nets.length > 0) networkName = nets[0];
-  } catch (e: any) {
-    console.warn('[docker] 无法探测面板网络（本地开发或缺少 docker.sock 时正常）:', e?.message || e);
+  // 找到「面板自身容器」以读取它所在网络，新建实例就接到同一网络，反代才能按容器名访问到实例。
+  // 候选依次：① 容器 hostname（默认 = 自身短 ID）② 已知面板容器名。
+  // 关键兜底：面板经「一键更新」自更新后，其 hostname 可能被复刻成【旧容器 ID】（已删除），① 会 404，
+  // 这时必须按容器名 ② 找到自己，否则探测失败→新建/重启的实例落到默认 bridge 网络→反代按名访问不到→502 黑屏。
+  const candidates = [hostname(), process.env.WOC_PANEL_CONTAINER || 'woc-panel'];
+  for (const cand of candidates) {
+    if (!cand) continue;
+    try {
+      const info = await docker.getContainer(cand).inspect();
+      const nets = Object.keys(info.NetworkSettings?.Networks || {}).filter((n) => n !== 'none' && n !== 'host');
+      if (nets.length > 0) {
+        networkName = nets[0];
+        return networkName;
+      }
+    } catch {
+      /* 该候选找不到/读不到，尝试下一个 */
+    }
   }
+  console.warn('[docker] 无法探测面板网络（本地开发或缺少 docker.sock 时正常）');
   return networkName;
 }
 
